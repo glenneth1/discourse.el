@@ -157,6 +157,18 @@ Ported from nndiscourse."
     (with-temp-buffer
       (insert body)
       (mm-url-decode-entities)
+      ;; Strip srcset attributes that confuse shr image rendering
+      (goto-char (point-min))
+      (while (re-search-forward "\\s-+srcset=\"[^\"]*\"" nil t)
+        (replace-match ""))
+      ;; Strip data-* attributes
+      (goto-char (point-min))
+      (while (re-search-forward "\\s-+data-[a-z-]+=\"[^\"]*\"" nil t)
+        (replace-match ""))
+      ;; Strip loading="lazy" which shr doesn't understand
+      (goto-char (point-min))
+      (while (re-search-forward "\\s-+loading=\"[^\"]*\"" nil t)
+        (replace-match ""))
       (buffer-string))))
 
 ;;; ======================================================================
@@ -900,7 +912,7 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
                             (url-generic-parse-url
                              (discourse-site-url discourse--current-site))))
                 (dom (with-temp-buffer
-                       (insert cooked)
+                       (insert (discourse-ui--massage-html cooked))
                        (libxml-parse-html-region (point-min) (point-max)))))
             (shr-insert-document dom))
         (insert (discourse-ui--massage-html cooked))))
