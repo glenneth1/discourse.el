@@ -6,14 +6,16 @@ Unlike [nndiscourse](https://github.com/dickmao/nndiscourse) (a Gnus backend), `
 
 ## Features
 
-- **Browse categories and topics** — tabulated list views with sorting
+- **Persistent sidebar** — categories, navigation items, unread/new counts
+- **Split-window layout** — sidebar stays visible alongside topics and posts
+- **Browse categories and topics** — with pagination and unread highlighting
 - **Read topic threads** — HTML posts rendered via `shr`
 - **Create new topics** — compose in Markdown
 - **Reply to posts** — topic-level or post-level replies
 - **Like posts**
 - **Search** forums
 - **Notifications** viewer
-- **Multiple site support** — switch between forums
+- **Multiple site support** — switch between forums with per-site config
 
 ## Authentication
 
@@ -35,19 +37,6 @@ For sites without API keys, use your login credentials:
 machine discourse.example.com login YOUR_USERNAME password YOUR_PASSWORD
 ```
 
-Set the auth method in your config:
-
-```elisp
-;; Default: tries API key first, falls back to session
-(setq discourse-api-auth-method 'auto)
-
-;; Force API key only
-(setq discourse-api-auth-method 'api-key)
-
-;; Force session (username/password) only
-(setq discourse-api-auth-method 'session)
-```
-
 ## Install
 
 ### Manual
@@ -61,18 +50,54 @@ Add to your `init.el`:
 ```elisp
 (add-to-list 'load-path "~/path/to/discourse.el")
 (require 'discourse)
-
-;; Optional: set a default site
 (setq discourse-default-url "https://discourse.example.com")
 ```
 
-### use-package (manual path)
+### use-package
 
 ```elisp
 (use-package discourse
   :load-path "~/path/to/discourse.el"
+  :commands (discourse discourse-connect discourse-switch-site)
   :custom
-  (discourse-default-url "https://discourse.example.com"))
+  (discourse-default-url "https://discourse.example.com")
+  (discourse-api-auth-method 'auto)
+  (discourse-site-configs
+   '(("https://discourse.example.com" :auth-method session)
+     ("https://meta.discourse.org" :auth-method api-key))))
+```
+
+## Configuration
+
+### Auth method
+
+```elisp
+;; 'auto (default) — tries API key first, falls back to session
+;; 'api-key       — API key only
+;; 'session       — username/password only
+(setq discourse-api-auth-method 'auto)
+```
+
+### Per-site config
+
+Override the auth method per site:
+
+```elisp
+(setq discourse-site-configs
+      '(("https://forum.example.com" :auth-method session)
+        ("https://meta.discourse.org" :auth-method api-key)))
+```
+
+### Sidebar width
+
+```elisp
+(setq discourse-ui-sidebar-width 35)  ; default: 35 columns
+```
+
+### Topic page size
+
+```elisp
+(setq discourse-ui-topic-page-size 30)  ; default: 30 topics per page
 ```
 
 ## Usage
@@ -89,30 +114,42 @@ Or, if you've set `discourse-default-url`:
 M-x discourse
 ```
 
+To switch between multiple forums:
+
+```text
+M-x discourse-switch-site
+```
+
+Use `C-u M-x discourse-connect` to force a URL prompt even when a default is set.
+
 ### Keybindings
 
-#### Category List
+#### Sidebar (Categories)
 
-| Key   | Action                          |
-|-------|---------------------------------|
-| `RET` | Open category (show topics)     |
-| `g`   | Refresh categories              |
-| `L`   | Show latest topics (all)        |
-| `s`   | Search                          |
-| `n`   | Show notifications              |
-| `q`   | Quit                            |
+| Key       | Action                          |
+|-----------|---------------------------------|
+| `RET`     | Open item (category/nav)        |
+| `n` / `p` | Next / previous item            |
+| `TAB`     | Next item                       |
+| `o`       | Switch to content window        |
+| `s`       | Search                          |
+| `g`       | Refresh                         |
+| `q`       | Quit                            |
 
 #### Topic List
 
 | Key   | Action                          |
 |-------|---------------------------------|
 | `RET` | Open topic (show posts)         |
-| `g`   | Refresh topics                  |
+| `n`   | Next topic                      |
+| `p`   | Previous topic                  |
 | `N`   | Next page                       |
 | `P`   | Previous page                   |
 | `c`   | Compose new topic               |
+| `o`   | Switch to sidebar               |
 | `s`   | Search                          |
-| `q`   | Quit (back to categories)       |
+| `g`   | Refresh                         |
+| `q`   | Quit (back to sidebar)          |
 
 #### Topic/Post View
 
@@ -123,6 +160,7 @@ M-x discourse
 | `r`   | Reply to topic                  |
 | `R`   | Reply to post at point          |
 | `l`   | Like post at point              |
+| `o`   | Switch to sidebar               |
 | `b`   | Open in browser                 |
 | `g`   | Refresh                         |
 | `SPC` | Scroll down                     |
@@ -141,7 +179,7 @@ M-x discourse
 
 | Feature          | nndiscourse                    | discourse.el              |
 |------------------|--------------------------------|---------------------------|
-| **UI**           | Gnus (newsreader)              | Standalone buffers        |
+| **UI**           | Gnus (newsreader)              | Standalone buffers + sidebar |
 | **Dependencies** | Ruby, rbenv, bundler, Cask     | None (pure Elisp)         |
 | **Auth**         | Public sites only (originally) | API key + session login   |
 | **Posting**      | Not implemented                | Full support              |

@@ -151,7 +151,7 @@ Shows currently connected sites and saved sites."
                                 url))
                             all-urls))
          (choice (completing-read "Switch to Discourse site: "
-                                  annotated nil nil "https://"))
+                                  annotated nil nil))
          (url (replace-regexp-in-string " \\[connected\\]$" "" choice)))
     (let ((existing (gethash url discourse--sites)))
       (if existing
