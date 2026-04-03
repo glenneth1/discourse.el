@@ -88,7 +88,11 @@ Otherwise display raw HTML."
   :group 'discourse-ui)
 
 (defface discourse-ui-unread-face
-  '((t :weight bold))
+  '((((class color) (background dark))
+     :weight bold :foreground "#51afef")
+    (((class color) (background light))
+     :weight bold :foreground "#0054b6")
+    (t :weight bold))
   "Face for unread/unseen topics."
   :group 'discourse-ui)
 
@@ -624,8 +628,12 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
          (unread-posts (or (alist-get 'unread_posts topic) 0))
          (new-posts (or (alist-get 'new_posts topic) 0))
          (is-unread (or unseen (> unread-posts 0) (> new-posts 0)))
+         (unread-count (+ unread-posts new-posts))
+         (title-display (if (and is-unread (> unread-count 0))
+                           (format "%s  (%d new)" title unread-count)
+                         title))
          (title-face (cond (is-unread 'discourse-ui-unread-face)
-                           (t 'discourse-ui-topic-title-face)))
+                           (t 'discourse-ui-read-face)))
          (posters (alist-get 'posters topic))
          (author-name
           (or (when posters
@@ -643,10 +651,10 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
            (cond (pinned (propertize "*" 'face 'discourse-ui-pinned-face))
                  (is-unread (propertize "●" 'face 'discourse-ui-unread-face))
                  (t " "))
-           (propertize title 'face title-face)
+           (propertize title-display 'face title-face)
            (propertize author-name 'face (if is-unread
                                              'discourse-ui-unread-face
-                                           'discourse-ui-author-face))
+                                           'discourse-ui-date-face))
            (number-to-string posts-count)
            (number-to-string views)
            (propertize (discourse-ui--format-time-elapsed last-posted)
