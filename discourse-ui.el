@@ -896,6 +896,9 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
           (let ((shr-width (min (- (window-width) 4) 80))
                 (shr-use-fonts nil)
                 (shr-inhibit-images nil)
+                (shr-base (when discourse--current-site
+                            (url-generic-parse-url
+                             (discourse-site-url discourse--current-site))))
                 (dom (with-temp-buffer
                        (insert cooked)
                        (libxml-parse-html-region (point-min) (point-max)))))
