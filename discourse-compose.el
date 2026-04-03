@@ -145,7 +145,7 @@ TOPIC-TITLE and REPLY-TO-USERNAME are used for display."
 Returns the title string or nil."
   (save-excursion
     (goto-char (point-min))
-    (when (re-search-forward "^Title: \\(.*\\)$" nil t)
+    (when (re-search-forward "^Title:\\s-*\\(.*\\)$" nil t)
       (let ((title (string-trim (match-string 1))))
         (when (> (length title) 0) title)))))
 
