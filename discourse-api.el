@@ -295,7 +295,10 @@ Looks up credentials from auth-source and authenticates.
 Returns a `discourse-site' struct on success."
   (let* ((parsed (url-generic-parse-url url))
          (host (url-host parsed))
-         (base-url (concat (url-type parsed) "://" host))
+         (port (url-port-if-non-default parsed))
+         (base-url (if port
+                       (format "%s://%s:%d" (url-type parsed) host port)
+                     (concat (url-type parsed) "://" host)))
          (auth (discourse-api--get-auth-info host))
          (site (discourse-site--create
                 :url base-url
