@@ -35,6 +35,8 @@
 
 (declare-function discourse-compose--reply "discourse-compose" (topic-id &optional reply-to-post-number topic-title reply-to-username))
 (declare-function discourse-compose--new-topic "discourse-compose" (category-id &optional category-name))
+(declare-function discourse-mark-topic-read "discourse" (topic-id highest-post-number))
+(declare-function discourse-topic-read-post-number "discourse" (site-url topic-id))
 
 ;;; --- Customization ---
 
@@ -624,14 +626,35 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
          (views (or (alist-get 'views topic) 0))
          (last-posted (or (alist-get 'last_posted_at topic)
                           (alist-get 'created_at topic) ""))
+         (highest-post (or (alist-get 'highest_post_number topic) 0))
+         ;; Server-side tracking
          (unseen (eq (alist-get 'unseen topic) t))
          (unread-posts (or (alist-get 'unread_posts topic) 0))
          (new-posts (or (alist-get 'new_posts topic) 0))
-         (is-unread (or unseen (> unread-posts 0) (> new-posts 0)))
-         (unread-count (+ unread-posts new-posts))
-         (title-display (if (and is-unread (> unread-count 0))
-                           (format "%s  (%d new)" title unread-count)
-                         title))
+         (server-unread (or unseen (> unread-posts 0) (> new-posts 0)))
+         ;; Client-side tracking (fallback)
+         (site-url (when discourse--current-site
+                     (discourse-site-url discourse--current-site)))
+         (read-post (if site-url
+                        (discourse-topic-read-post-number site-url id)
+                      0))
+         (client-new (= read-post 0))
+         (client-unread (and (> read-post 0) (> highest-post read-post)))
+         ;; Merge: server wins when it has data, else use client
+         (is-new (or unseen client-new))
+         (is-unread (or server-unread client-unread))
+         (unread-count (if server-unread
+                           (+ unread-posts new-posts)
+                         (if client-unread
+                             (- highest-post read-post)
+                           0)))
+         (title-display (cond
+                         ((and is-new client-new)
+                          (format "%s  [NEW]" title))
+                         ((and is-unread (> unread-count 0))
+                          (format "%s  (%d new)" title unread-count))
+                         (is-unread title)
+                         (t title)))
          (title-face (cond (is-unread 'discourse-ui-unread-face)
                            (t 'discourse-ui-read-face)))
          (posters (alist-get 'posters topic))
@@ -822,6 +845,8 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
   (let ((data (discourse-api-get-topic topic-id)))
     (if (or (null data) (alist-get 'error data))
         (message "Failed to fetch topic %d" topic-id)
+      (discourse-mark-topic-read
+       topic-id (or (alist-get 'highest_post_number data) 0))
       (let* ((title (alist-get 'title data))
              (host (when discourse--current-site
                      (url-host (url-generic-parse-url

@@ -91,6 +91,67 @@ Example:
   :type '(alist :key-type string :value-type plist)
   :group 'discourse)
 
+;;; --- Read-state tracking (client-side, persisted to disk) ---
+
+(defcustom discourse-read-state-file
+  (expand-file-name "discourse-read-state.el" user-emacs-directory)
+  "File to persist topic read state across sessions."
+  :type 'file
+  :group 'discourse)
+
+(defvar discourse--read-state (make-hash-table :test 'equal)
+  "Hash table: \"site-url::topic-id\" -> highest-post-number seen.")
+
+(defvar discourse--read-state-loaded nil
+  "Non-nil if read state has been loaded from disk.")
+
+(defun discourse--read-state-key (site-url topic-id)
+  "Make a read-state key from SITE-URL and TOPIC-ID."
+  (format "%s::%d" site-url topic-id))
+
+(defun discourse--read-state-load ()
+  "Load read state from `discourse-read-state-file'."
+  (when (and (not discourse--read-state-loaded)
+             (file-exists-p discourse-read-state-file))
+    (condition-case err
+        (with-temp-buffer
+          (insert-file-contents discourse-read-state-file)
+          (let ((data (read (current-buffer))))
+            (when (hash-table-p data)
+              (setq discourse--read-state data))))
+      (error
+       (message "discourse: error loading read state: %s"
+                (error-message-string err)))))
+  (setq discourse--read-state-loaded t))
+
+(defun discourse--read-state-save ()
+  "Save read state to `discourse-read-state-file'."
+  (condition-case err
+      (with-temp-file discourse-read-state-file
+        (let ((print-level nil)
+              (print-length nil))
+          (prin1 discourse--read-state (current-buffer))))
+    (error
+     (message "discourse: error saving read state: %s"
+              (error-message-string err)))))
+
+(defun discourse-mark-topic-read (topic-id highest-post-number)
+  "Mark TOPIC-ID as read up to HIGHEST-POST-NUMBER for the current site."
+  (discourse--read-state-load)
+  (when discourse--current-site
+    (let* ((key (discourse--read-state-key
+                 (discourse-site-url discourse--current-site) topic-id))
+           (prev (gethash key discourse--read-state 0)))
+      (when (> highest-post-number prev)
+        (puthash key highest-post-number discourse--read-state)
+        (discourse--read-state-save)))))
+
+(defun discourse-topic-read-post-number (site-url topic-id)
+  "Return the highest post number seen for TOPIC-ID on SITE-URL, or 0."
+  (discourse--read-state-load)
+  (gethash (discourse--read-state-key site-url topic-id)
+           discourse--read-state 0))
+
 ;;; --- Interactive commands ---
 
 (defun discourse--site-auth-method (url)
