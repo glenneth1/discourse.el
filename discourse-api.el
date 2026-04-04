@@ -492,6 +492,95 @@ Returns a flat list of all categories including subcategories."
 )
       (nreverse all-cats))))
 
+;;; --- File uploads ---
+
+(defun discourse-api--multipart-boundary ()
+  "Generate a unique multipart boundary string."
+  (format "----discourse-el-%s%s"
+          (format-time-string "%s")
+          (random 100000)))
+
+(defun discourse-api--mime-type (filename)
+  "Guess MIME type for FILENAME."
+  (let ((ext (downcase (or (file-name-extension filename) ""))))
+    (cond
+     ((member ext '("jpg" "jpeg")) "image/jpeg")
+     ((string= ext "png") "image/png")
+     ((string= ext "gif") "image/gif")
+     ((string= ext "webp") "image/webp")
+     ((string= ext "svg") "image/svg+xml")
+     ((string= ext "pdf") "application/pdf")
+     ((string= ext "zip") "application/zip")
+     ((string= ext "txt") "text/plain")
+     (t "application/octet-stream"))))
+
+(defun discourse-api-upload-file (file-path &optional site)
+  "Upload FILE-PATH to the Discourse instance on SITE.
+Uses curl for reliable binary upload.
+Returns the parsed JSON response with `url', `short_url',
+`original_filename', `width', `height', etc., or nil on failure."
+  (unless (executable-find "curl")
+    (user-error "curl is required for file uploads"))
+  (let* ((site (or site discourse--current-site))
+         (base-url (and site (discourse-site-url site)))
+         (full-url (concat base-url "/uploads.json"))
+         (curl-args (list "-s" "-X" "POST"
+                          "-F" "type=composer"
+                          "-F" (format "file=@%s" (expand-file-name file-path))
+                          "-H" "Accept: application/json")))
+    ;; Add auth headers
+    (when site
+      (cl-case (discourse-site-auth-method site)
+        (api-key
+         (when (discourse-site-api-key site)
+           (push (format "Api-Key: %s" (discourse-site-api-key site))
+                 curl-args)
+           (push "-H" curl-args))
+         (when (discourse-site-username site)
+           (push (format "Api-Username: %s" (discourse-site-username site))
+                 curl-args)
+           (push "-H" curl-args)))
+        (session
+         (when (discourse-site-csrf-token site)
+           (push (format "X-CSRF-Token: %s" (discourse-site-csrf-token site))
+                 curl-args)
+           (push "-H" curl-args))
+         (when (discourse-site-session-cookie site)
+           (push (format "Cookie: %s" (discourse-site-session-cookie site))
+                 curl-args)
+           (push "-H" curl-args)))))
+    ;; Add URL last
+    (setq curl-args (append curl-args (list full-url)))
+    (condition-case err
+        (with-temp-buffer
+          (let ((exit-code (apply #'call-process "curl" nil t nil curl-args)))
+            (if (zerop exit-code)
+                (progn
+                  (goto-char (point-min))
+                  (condition-case parse-err
+                      (let ((json-object-type 'alist)
+                            (json-array-type 'vector)
+                            (json-key-type 'symbol))
+                        (let ((result (json-read)))
+                          (if (alist-get 'url result)
+                              result
+                            (message "discourse-api: upload response: %S" result)
+                            result)))
+                    (error
+                     (message "discourse-api: upload parse error: %s\nResponse: %s"
+                              (error-message-string parse-err)
+                              (buffer-substring-no-properties
+                               (point-min) (min (point-max) (+ (point-min) 500))))
+                     nil)))
+              (message "discourse-api: curl exited with code %d: %s"
+                       exit-code
+                       (buffer-substring-no-properties
+                        (point-min) (min (point-max) (+ (point-min) 500))))
+              nil)))
+      (error
+       (message "discourse-api: upload error: %s" (error-message-string err))
+       nil))))
+
 (provide 'discourse-api)
 
 ;;; discourse-api.el ends here

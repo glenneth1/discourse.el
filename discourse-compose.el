@@ -73,6 +73,7 @@
     (define-key map (kbd "C-c C-c") #'discourse-compose-send)
     (define-key map (kbd "C-c C-k") #'discourse-compose-cancel)
     (define-key map (kbd "C-c C-p") #'discourse-compose-preview)
+    (define-key map (kbd "C-c C-i") #'discourse-compose-attach-file)
     map)
   "Keymap for `discourse-compose-mode'.")
 
@@ -92,6 +93,7 @@ Discourse uses Markdown for formatting.
                      (define-key map (kbd "C-c C-c") #'discourse-compose-send)
                      (define-key map (kbd "C-c C-k") #'discourse-compose-cancel)
                      (define-key map (kbd "C-c C-p") #'discourse-compose-preview)
+                     (define-key map (kbd "C-c C-i") #'discourse-compose-attach-file)
                      map))))
 
 ;;; --- Entry points ---
@@ -110,7 +112,7 @@ Discourse uses Markdown for formatting.
       (insert "Title: \n")
       (insert (make-string 40 ?─) "\n")
       (insert "<!-- Write your topic body below in Markdown -->\n")
-      (insert "<!-- C-c C-c to send, C-c C-k to cancel -->\n\n")
+      (insert "<!-- C-c C-c to send, C-c C-k to cancel, C-c C-i to attach file -->\n\n")
       (goto-char (point-min))
       (end-of-line))
     (switch-to-buffer buf)))
@@ -134,7 +136,7 @@ TOPIC-TITLE and REPLY-TO-USERNAME are used for display."
             discourse-compose--title topic-title)
       (erase-buffer)
       (insert (format "<!-- %s -->\n" label))
-      (insert "<!-- C-c C-c to send, C-c C-k to cancel -->\n\n")
+      (insert "<!-- C-c C-c to send, C-c C-k to cancel, C-c C-i to attach file -->\n\n")
       (goto-char (point-max)))
     (switch-to-buffer buf)))
 
@@ -241,6 +243,65 @@ Strips the header/separator lines for new topics."
         (goto-char (point-min))
         (special-mode))
       (display-buffer (current-buffer)))))
+
+;;; --- File/Image attachments ---
+
+(defun discourse-compose--image-p (filename)
+  "Return non-nil if FILENAME looks like an image."
+  (let ((ext (downcase (or (file-name-extension filename) ""))))
+    (member ext '("jpg" "jpeg" "png" "gif" "webp" "svg" "bmp" "ico"))))
+
+(defun discourse-compose-attach-file (file-path)
+  "Upload FILE-PATH to Discourse and insert a markdown link at point.
+For images, inserts ![name](url).  For other files, inserts [name](url).
+Prompts for a file path interactively."
+  (interactive
+   (list (read-file-name "Attach file: " nil nil t)))
+  (unless (file-exists-p file-path)
+    (user-error "File does not exist: %s" file-path))
+  (unless discourse--current-site
+    (user-error "Not connected to any Discourse site"))
+  (let ((filename (file-name-nondirectory file-path))
+        (size (file-attribute-size (file-attributes file-path))))
+    (message "Uploading %s (%s)..." filename
+             (file-size-human-readable size))
+    (let ((result (discourse-api-upload-file file-path)))
+      (if (null result)
+          (user-error "Upload failed — check *Messages* for details")
+        (let* ((short-url (alist-get 'short_url result))
+               (full-url (alist-get 'url result))
+               (base-url (when discourse--current-site
+                           (discourse-site-url discourse--current-site)))
+               ;; Build a proper absolute URL from the response
+               (url-path (cond
+                          ;; Protocol-relative URL like //host:port/path
+                          ;; Extract just the path part after the host
+                          ((and full-url (string-prefix-p "//" full-url))
+                           (if (string-match "//[^/]+\\(/.*\\)" full-url)
+                               (match-string 1 full-url)
+                             full-url))
+                          (t full-url)))
+               (url (cond
+                     ;; Combine path with actual base URL
+                     ((and url-path base-url (string-prefix-p "/" url-path))
+                      (concat base-url url-path))
+                     ;; Already absolute
+                     ((and url-path (string-match-p "^https?://" url-path))
+                      url-path)
+                     ;; Fallback to short_url
+                     (t short-url)))
+               (orig-name (or (alist-get 'original_filename result) filename))
+               (width (alist-get 'width result))
+               (height (alist-get 'height result))
+               (is-image (discourse-compose--image-p orig-name))
+               (markdown
+                (if is-image
+                    (if (and width height)
+                        (format "![%s|%dx%d](%s)" orig-name width height url)
+                      (format "![%s](%s)" orig-name url))
+                  (format "[%s|attachment](%s)" orig-name url))))
+          (insert markdown)
+          (message "Attached: %s" orig-name))))))
 
 (provide 'discourse-compose)
 
