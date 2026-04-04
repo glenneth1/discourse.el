@@ -834,14 +834,19 @@ Returns an alist of (category-id . (:new N :unread M))."
 (defun discourse-ui-topics-quit ()
   "Quit topic list and return to sidebar."
   (interactive)
-  (let ((buf (current-buffer)))
-    ;; Ensure sidebar is visible before killing
+  (let ((buf (current-buffer))
+        (win (selected-window)))
+    ;; Select sidebar before killing
     (let ((sidebar-win (or (discourse-ui--sidebar-window)
                            (discourse-ui--ensure-sidebar))))
       (when sidebar-win
         (select-window sidebar-win)))
+    ;; Kill the topic list buffer and its window
     (when (buffer-live-p buf)
-      (kill-buffer buf))))
+      (kill-buffer buf))
+    (when (and (window-live-p win)
+               (not (eq win (selected-window))))
+      (delete-window win))))
 
 (defun discourse-ui-open-topic ()
   "Open the topic at point, showing its posts."
@@ -1007,8 +1012,41 @@ Returns an alist of (category-id . (:new N :unread M))."
 
 ;;; --- Topic view commands ---
 
+(defun discourse-ui--rerender-topics-buffer ()
+  "Re-render the topic list entries in any visible topics-mode buffer using cached data.
+Does not make API calls; just reformats with updated read state."
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and (derived-mode-p 'discourse-ui-topics-mode)
+                   discourse-ui--topics-data)
+          (let ((pos (point)))
+            (setq tabulated-list-entries
+                  (cl-remove-if #'null
+                                (mapcar (lambda (tp)
+                                          (discourse-ui--format-topic-entry
+                                           tp discourse-ui--topics-users))
+                                        (append discourse-ui--topics-data nil))))
+            (tabulated-list-print t)
+            (goto-char (min pos (point-max)))))))))
+
+(defun discourse-ui--rerender-sidebar ()
+  "Re-render the sidebar with updated category counts using cached data."
+  (when (and discourse-ui--sidebar-buffer
+             (buffer-live-p discourse-ui--sidebar-buffer))
+    (with-current-buffer discourse-ui--sidebar-buffer
+      (when discourse-ui--categories-data
+        (let ((cat-counts (discourse-ui--compute-category-counts)))
+          (setq discourse-ui--categories-data
+                (discourse-ui--inject-category-counts
+                 discourse-ui--categories-data cat-counts)))
+        (discourse-ui--render-sidebar discourse-ui--categories-data
+                                      (or discourse-ui--nav-items
+                                          (list :unread 0 :new 0 :messages 0)))
+        (goto-char (point-min))))))
+
 (defun discourse-ui-topic-quit ()
-  "Quit topic view and return to previous window or sidebar."
+  "Quit topic view and return to the topic list or sidebar."
   (interactive)
   (let ((buf (current-buffer)))
     ;; Try to find another non-sidebar window to land on
@@ -1024,7 +1062,10 @@ Returns an alist of (category-id . (:new N :unread M))."
        ((discourse-ui--ensure-sidebar)
         (select-window (discourse-ui--ensure-sidebar)))))
     (when (buffer-live-p buf)
-      (kill-buffer buf))))
+      (kill-buffer buf))
+    ;; Re-render topic list and sidebar with updated read state
+    (discourse-ui--rerender-topics-buffer)
+    (discourse-ui--rerender-sidebar)))
 
 (defun discourse-ui-refresh-topic ()
   "Refresh the current topic view."
