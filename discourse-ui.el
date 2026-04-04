@@ -362,6 +362,49 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
     (put-text-property start (point) 'discourse-action 'category)
     (put-text-property start (point) 'discourse-item t)))
 
+(defun discourse-ui--compute-category-counts ()
+  "Compute per-category new/unread counts from latest topics using client read state.
+Returns an alist of (category-id . (:new N :unread M))."
+  (let ((counts (make-hash-table :test 'eql))
+        (site-url (when discourse--current-site
+                    (discourse-site-url discourse--current-site))))
+    (when site-url
+      (condition-case nil
+          (let* ((data (discourse-api-get-latest-topics nil))
+                 (topic-list (alist-get 'topic_list data))
+                 (topics (alist-get 'topics topic-list)))
+            (seq-doseq (topic (if (vectorp topics) topics (vconcat topics)))
+              (let* ((cat-id (alist-get 'category_id topic))
+                     (topic-id (alist-get 'id topic))
+                     (highest (or (alist-get 'highest_post_number topic) 0))
+                     (read-post (discourse-topic-read-post-number site-url topic-id))
+                     (entry (or (gethash cat-id counts) (list :new 0 :unread 0))))
+                (cond
+                 ((= read-post 0)
+                  (plist-put entry :new (1+ (plist-get entry :new))))
+                 ((> highest read-post)
+                  (plist-put entry :unread (1+ (plist-get entry :unread)))))
+                (puthash cat-id entry counts))))
+        (error nil)))
+    counts))
+
+(defun discourse-ui--inject-category-counts (categories counts)
+  "Inject client-side COUNTS into CATEGORIES data for sidebar display."
+  (mapcar (lambda (cat)
+            (let* ((id (alist-get 'id cat))
+                   (entry (gethash id counts)))
+              (if entry
+                  (let ((cat-copy (copy-alist cat)))
+                    (setf (alist-get 'new_topics cat-copy)
+                          (max (or (alist-get 'new_topics cat-copy) 0)
+                               (plist-get entry :new)))
+                    (setf (alist-get 'unread cat-copy)
+                          (max (or (alist-get 'unread cat-copy) 0)
+                               (plist-get entry :unread)))
+                    cat-copy)
+                cat)))
+          categories))
+
 (defun discourse-ui-show-categories ()
   "Display the sidebar-style category list for the current Discourse site."
   (interactive)
@@ -396,6 +439,9 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
         (setq cats (discourse-api-get-categories)))
     (if (null cats)
         (message "No categories found or request failed.")
+      ;; Compute client-side new/unread counts per category
+      (let ((cat-counts (discourse-ui--compute-category-counts)))
+        (setq cats (discourse-ui--inject-category-counts cats cat-counts)))
       (setq discourse-ui--categories-data cats)
       ;; Fetch navigation counts
       (let ((nav-counts (discourse-ui--fetch-nav-counts)))
