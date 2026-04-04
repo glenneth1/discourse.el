@@ -94,7 +94,10 @@ Discourse uses Markdown for formatting.
                      (define-key map (kbd "C-c C-k") #'discourse-compose-cancel)
                      (define-key map (kbd "C-c C-p") #'discourse-compose-preview)
                      (define-key map (kbd "C-c C-i") #'discourse-compose-attach-file)
-                     map))))
+                     map)))
+  ;; @mention username completion
+  (add-hook 'completion-at-point-functions
+            #'discourse-compose--mention-capf nil t))
 
 ;;; --- Entry points ---
 
@@ -243,6 +246,54 @@ Strips the header/separator lines for new topics."
         (goto-char (point-min))
         (special-mode))
       (display-buffer (current-buffer)))))
+
+;;; --- @mention username completion ---
+
+(defvar-local discourse-compose--user-cache nil
+  "Cache of (TIMESTAMP . USERS-ALIST) for mention completion.")
+
+(defvar discourse-compose--user-cache-ttl 30
+  "Seconds to cache user search results.")
+
+(defun discourse-compose--search-users (term)
+  "Search for users matching TERM, with caching."
+  (let* ((now (float-time))
+         (cached discourse-compose--user-cache)
+         (cache-key (downcase (or term ""))))
+    ;; Return cached if same prefix and fresh
+    (if (and cached
+             (string-prefix-p (car cached) cache-key)
+             (< (- now (cadr cached)) discourse-compose--user-cache-ttl))
+        (cddr cached)
+      (let ((users (discourse-api-search-users term)))
+        (setq discourse-compose--user-cache
+              (cons cache-key (cons now users)))
+        users))))
+
+(defun discourse-compose--mention-capf ()
+  "Completion-at-point function for @mentions in compose buffers."
+  (when-let* ((end (point))
+              (start (save-excursion
+                       (when (re-search-backward "@\\([A-Za-z0-9_.-]*\\)\\="
+                                                 (line-beginning-position) t)
+                         (1+ (match-beginning 0))))))
+    (let ((prefix (buffer-substring-no-properties start end)))
+      (list start end
+            (completion-table-dynamic
+             (lambda (_)
+               (mapcar (lambda (u) (alist-get 'username u))
+                       (discourse-compose--search-users prefix))))
+            :annotation-function
+            (lambda (candidate)
+              (when-let* ((users (cddr discourse-compose--user-cache))
+                          (user (seq-find
+                                 (lambda (u)
+                                   (string= (alist-get 'username u) candidate))
+                                 users))
+                          (name (alist-get 'name user)))
+                (when (and name (not (string= name "")))
+                  (format "  (%s)" name))))
+            :exclusive 'no))))
 
 ;;; --- File/Image attachments ---
 

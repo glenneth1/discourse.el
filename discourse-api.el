@@ -153,10 +153,17 @@ Returns parsed JSON or nil on failure."
            (push (cons "Api-Username" (discourse-site-username site)) headers)))
         (session
          (when (discourse-site-csrf-token site)
-           (push (cons "X-CSRF-Token" (discourse-site-csrf-token site)) headers))
-         (when (discourse-site-session-cookie site)
-           (push (cons "Cookie" (discourse-site-session-cookie site)) headers)))))
+           (push (cons "X-CSRF-Token" (discourse-site-csrf-token site)) headers)))))
     headers))
+
+(defun discourse-api--refresh-csrf (site)
+  "Refresh the CSRF token for SITE if using session auth.
+Returns non-nil if the token was refreshed."
+  (when (and site (eq (discourse-site-auth-method site) 'session))
+    (let ((new-token (discourse-api--get-csrf-token site)))
+      (when new-token
+        (setf (discourse-site-csrf-token site) new-token)
+        t))))
 
 (defun discourse-api--request (method url-path &optional data site)
   "Make an HTTP request to the Discourse API.
@@ -165,8 +172,18 @@ URL-PATH is the path (e.g. \"/categories.json\").
 DATA is an alist to JSON-encode as the request body.
 SITE is a `discourse-site' struct (defaults to `discourse--current-site').
 Returns parsed JSON response or nil on failure."
-  (let* ((site (or site discourse--current-site))
-         (base-url (and site (discourse-site-url site)))
+  (let ((site (or site discourse--current-site)))
+    ;; Refresh CSRF token before write requests with session auth
+    (when (and (member method '("POST" "PUT" "DELETE"))
+               site
+               (eq (discourse-site-auth-method site) 'session))
+      (discourse-api--refresh-csrf site))
+    (discourse-api--request-1 method url-path data site)))
+
+(defun discourse-api--request-1 (method url-path data site)
+  "Internal: perform the actual HTTP request.
+See `discourse-api--request' for parameter details."
+  (let* ((base-url (and site (discourse-site-url site)))
          (full-url (concat base-url url-path))
          (url-request-method method)
          (url-request-extra-headers
@@ -216,7 +233,9 @@ Returns parsed JSON response or nil on failure."
 ;;; --- CSRF / Session auth (ported from nndiscourse) ---
 
 (defun discourse-api--get-csrf-token (site)
-  "Fetch CSRF token for SITE.  Returns the token string or nil."
+  "Fetch CSRF token for SITE.  Returns the token string or nil.
+Relies on url.el's cookie jar for session cookies so the token
+matches the authenticated session."
   (let* ((url (concat (discourse-site-url site) "/session/csrf"))
          (url-request-method "GET")
          (url-request-extra-headers
@@ -448,6 +467,16 @@ If REPLY-TO-POST-NUMBER is provided, this is a reply to that specific post."
 
 ;; User
 
+(defun discourse-api-search-users (term &optional site)
+  "Search for usernames matching TERM on SITE.
+Returns a list of user alists with `username' and `name' keys."
+  (let ((result (discourse-api--get
+                 (format "/u/search/users.json?term=%s"
+                         (url-hexify-string (or term "")))
+                 site)))
+    (when result
+      (append (alist-get 'users result) nil))))
+
 (defun discourse-api-get-user (username &optional site)
   "Fetch user profile for USERNAME from SITE."
   (discourse-api--get (format "/u/%s.json" username) site))
@@ -528,6 +557,9 @@ Returns the parsed JSON response with `url', `short_url',
                           "-F" "type=composer"
                           "-F" (format "file=@%s" (expand-file-name file-path))
                           "-H" "Accept: application/json")))
+    ;; Refresh CSRF token for session auth before upload
+    (when (and site (eq (discourse-site-auth-method site) 'session))
+      (discourse-api--refresh-csrf site))
     ;; Add auth headers
     (when site
       (cl-case (discourse-site-auth-method site)

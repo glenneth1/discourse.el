@@ -175,7 +175,68 @@ Ported from nndiscourse."
       (goto-char (point-min))
       (while (re-search-forward "\\s-+loading=\"[^\"]*\"" nil t)
         (replace-match ""))
+      ;; Fix markdown artifacts left by Discourse's cooker
+      (discourse-ui--fix-markdown-artifacts)
       (buffer-string))))
+
+(defun discourse-ui--fix-markdown-artifacts ()
+  "Fix common markdown artifacts in the current buffer.
+Some Discourse posts contain partially-cooked markdown where
+formatting markers survive as literal text in the HTML."
+  ;; Pass 1: Remove <strong>**</strong> artifacts (double-bold remnants)
+  (goto-char (point-min))
+  (while (re-search-forward "<strong>\\*\\*</strong>" nil t)
+    (replace-match ""))
+  ;; Pass 2: Fix double-bold <strong>**text**</strong> → <strong>text</strong>
+  (goto-char (point-min))
+  (while (re-search-forward "<strong>\\*\\*\\([^*]+?\\)\\*\\*</strong>" nil t)
+    (replace-match "<strong>\\1</strong>"))
+  ;; Pass 2b: Strip leading/trailing ** inside <strong> tags
+  (goto-char (point-min))
+  (while (re-search-forward "<strong>\\*\\*\\(.*?\\)</strong>" nil t)
+    (replace-match "<strong>\\1</strong>"))
+  (goto-char (point-min))
+  (while (re-search-forward "<strong>\\(.*?\\)\\*\\*</strong>" nil t)
+    (replace-match "<strong>\\1</strong>"))
+  ;; Pass 3: Fix headings in bold: <p><strong>## Text</strong></p>
+  (goto-char (point-min))
+  (while (re-search-forward
+          "<p><strong>\\(#\\{2,6\\}\\) \\(.*?\\)</strong></p>" nil t)
+    (let ((level (length (match-string 1)))
+          (text (match-string 2)))
+      (replace-match (format "<h%d>%s</h%d>" level text level))))
+  ;; Pass 4: Fix plain headings: <p>## Text</p>
+  (goto-char (point-min))
+  (while (re-search-forward
+          "<p>\\(#\\{2,6\\}\\) \\(.*?\\)</p>" nil t)
+    (let ((level (length (match-string 1)))
+          (text (match-string 2)))
+      (replace-match (format "<h%d>%s</h%d>" level text level))))
+  ;; Pass 5: Fix remaining literal **text** → <strong>text</strong>
+  (goto-char (point-min))
+  (while (re-search-forward "\\*\\*\\([^*\n]+?\\)\\*\\*" nil t)
+    (replace-match "<strong>\\1</strong>"))
+  ;; Pass 6: Fix literal `text` → <code>text</code>
+  (goto-char (point-min))
+  (while (re-search-forward "`\\([^`\n]+?\\)`" nil t)
+    (replace-match "<code>\\1</code>"))
+  ;; Pass 7: Convert consecutive <p>- text</p> runs to <ul><li>...</li></ul>
+  (goto-char (point-min))
+  (while (re-search-forward "<p>- " nil t)
+    (let ((start (match-beginning 0))
+          (items '()))
+      (goto-char start)
+      ;; Collect consecutive <p>- text</p> items
+      (while (looking-at "<p>- \\(.*?\\)</p>\n?")
+        (push (match-string 1) items)
+        (goto-char (match-end 0)))
+      (when items
+        (delete-region start (point))
+        (goto-char start)
+        (insert "<ul>")
+        (dolist (item (nreverse items))
+          (insert "<li>" item "</li>"))
+        (insert "</ul>")))))
 
 ;;; ======================================================================
 ;;; Category List View (Sidebar-style)
