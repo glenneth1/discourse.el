@@ -1,6 +1,6 @@
 ;;; discourse-compose.el --- Compose new topics and replies  -*- lexical-binding: t; coding: utf-8 -*-
 
-;; Copyright (C) 2024 The Authors of discourse.el
+;; Copyright (C) 2024 Glenn Thompson
 
 ;; This file is part of discourse.el.
 
@@ -28,6 +28,10 @@
 (require 'discourse-api)
 
 (declare-function discourse-ui-show-topic "discourse-ui" (topic-id))
+
+(defvar discourse-compose-after-send-hook nil
+  "Hook run after a post is successfully sent.
+Each function receives the topic id of the newly created or replied-to topic.")
 
 ;;; --- Customization ---
 
@@ -201,7 +205,8 @@ Strips the header/separator lines for new topics."
                    (let ((topic-id (alist-get 'topic_id result)))
                      (kill-buffer (current-buffer))
                      (when topic-id
-                       (discourse-ui-show-topic topic-id))))
+                       (discourse-ui-show-topic topic-id)
+                       (run-hook-with-args 'discourse-compose-after-send-hook topic-id))))
                (message "Failed to create topic: %S"
                         (or (alist-get 'errors result)
                             (alist-get 'body result)
@@ -218,7 +223,9 @@ Strips the header/separator lines for new topics."
                  (message "Reply sent successfully!")
                  (let ((topic-id discourse-compose--topic-id))
                    (kill-buffer (current-buffer))
-                   (discourse-ui-show-topic topic-id)))
+                   (when topic-id
+                     (discourse-ui-show-topic topic-id)
+                     (run-hook-with-args 'discourse-compose-after-send-hook topic-id))))
              (message "Failed to send reply: %S"
                       (or (alist-get 'errors result)
                           (alist-get 'body result)

@@ -1,9 +1,10 @@
-;;; discourse.el --- Browse and post to Discourse forums from Emacs  -*- lexical-binding: t; coding: utf-8 -*-
+;;; discourse.el --- Browse and post to Discourse forums  -*- lexical-binding: t; coding: utf-8 -*-
 
-;; Copyright (C) 2024 The Authors of discourse.el
+;; Copyright (C) 2024 Glenn Thompson
 
-;; Authors: Glenn <glenn>
-;; Version: 0.1.0
+;; Author: Glenn Thompson <glennt40@gmail.com>
+;; Maintainer: Glenn Thompson <glennt40@gmail.com>
+;; Version: 0.2.0
 ;; Keywords: comm, forum
 ;; URL: https://github.com/glenneth1/discourse.el
 ;; Package-Requires: ((emacs "27.1"))
@@ -61,6 +62,10 @@
 (require 'discourse-api)
 (require 'discourse-ui)
 (require 'discourse-compose)
+
+;; Refresh visible topic lists and the sidebar after a post is sent.
+(add-hook 'discourse-compose-after-send-hook
+          #'discourse-ui--refresh-after-post)
 
 ;;; --- Customization ---
 
@@ -136,7 +141,9 @@ Example:
               (error-message-string err)))))
 
 (defun discourse-mark-topic-read (topic-id highest-post-number)
-  "Mark TOPIC-ID as read up to HIGHEST-POST-NUMBER for the current site."
+  "Mark TOPIC-ID as read up to HIGHEST-POST-NUMBER for the current site.
+Updates the local read-state cache and syncs the read state to the server so
+it also registers against the user's account on the website."
   (discourse--read-state-load)
   (when discourse--current-site
     (let* ((key (discourse--read-state-key
@@ -144,7 +151,15 @@ Example:
            (prev (gethash key discourse--read-state 0)))
       (when (> highest-post-number prev)
         (puthash key highest-post-number discourse--read-state)
-        (discourse--read-state-save)))))
+        (discourse--read-state-save))
+      ;; Sync read state to the server so the website reflects it too.
+      (when (> highest-post-number 0)
+        (condition-case err
+            (discourse-api-mark-topic-read
+             topic-id (number-sequence 1 highest-post-number))
+          (error
+           (message "discourse: could not sync read state to server: %s"
+                    (error-message-string err))))))))
 
 (defun discourse-topic-read-post-number (site-url topic-id)
   "Return the highest post number seen for TOPIC-ID on SITE-URL, or 0."

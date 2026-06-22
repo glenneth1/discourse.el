@@ -1,6 +1,6 @@
 ;;; discourse-ui.el --- Buffer-based UI for Discourse  -*- lexical-binding: t; coding: utf-8 -*-
 
-;; Copyright (C) 2024 The Authors of discourse.el
+;; Copyright (C) 2024 Glenn Thompson
 
 ;; This file is part of discourse.el.
 
@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'tabulated-list)
 (require 'shr)
 (require 'mm-url)
@@ -363,13 +364,30 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
     (insert (propertize "  ⌄  CATEGORIES"
                         'face '(:weight bold :inherit discourse-ui-date-face))
             "\n\n")
-    ;; --- Category list ---
-    (let ((sorted-cats (sort (append categories nil)
-                             (lambda (a b)
-                               (string< (downcase (or (alist-get 'name a) ""))
-                                        (downcase (or (alist-get 'name b) "")))))))
-      (dolist (cat sorted-cats)
-        (discourse-ui--insert-category-item cat)))
+    ;; --- Category list (with subcategory hierarchy) ---
+    (let* ((by-id (make-hash-table :test 'eql))
+           (children (make-hash-table :test 'eql))
+           (top-level nil))
+      ;; Index categories by ID and group children by parent
+      (dolist (cat categories)
+        (puthash (alist-get 'id cat) cat by-id)
+        (let ((parent (alist-get 'parent_category_id cat)))
+          (if parent
+              (push cat (gethash parent children))
+            (push cat top-level))))
+      ;; Sort and render top-level categories, then their subcategories
+      (setq top-level (sort top-level
+                            (lambda (a b)
+                              (string< (downcase (or (alist-get 'name a) ""))
+                                       (downcase (or (alist-get 'name b) ""))))))
+      (dolist (cat top-level)
+        (discourse-ui--insert-category-item cat)
+        (let ((subs (sort (gethash (alist-get 'id cat) children)
+                          (lambda (a b)
+                            (string< (downcase (or (alist-get 'name a) ""))
+                                     (downcase (or (alist-get 'name b) "")))))))
+          (dolist (sub subs)
+            (discourse-ui--insert-category-item sub t)))))
     ;; --- Footer with keybinding hints ---
     (insert "\n")
     (insert (propertize "  RET:open  n/p:navigate  o:content  s:search  g:refresh  q:quit"
@@ -388,8 +406,9 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
     (put-text-property start (point) 'discourse-action action)
     (put-text-property start (point) 'discourse-item t)))
 
-(defun discourse-ui--insert-category-item (cat)
-  "Insert a single category CAT as a sidebar item with colored square."
+(defun discourse-ui--insert-category-item (cat &optional subcategory-p)
+  "Insert a single category CAT as a sidebar item with colored square.
+If SUBCATEGORY-P is non-nil, indent the item to show hierarchy."
   (let* ((id (alist-get 'id cat))
          (name (or (alist-get 'name cat) ""))
          (color (alist-get 'color cat))
@@ -399,7 +418,7 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
          (color-str (discourse-ui--hex-to-color color))
          (start (point)))
     ;; Colored square indicator
-    (insert "  "
+    (insert (if subcategory-p "    " "  ")
             (propertize "■ " 'face `(:foreground ,color-str)))
     ;; Category name
     (insert (propertize name 'face (if has-activity
@@ -423,45 +442,135 @@ Ensures the sidebar is visible and shows BUFFER alongside it."
     (put-text-property start (point) 'discourse-action 'category)
     (put-text-property start (point) 'discourse-item t)))
 
-(defun discourse-ui--compute-category-counts ()
-  "Compute per-category new/unread counts from latest topics using client read state.
-Returns an alist of (category-id . (:new N :unread M))."
-  (let ((counts (make-hash-table :test 'eql))
-        (site-url (when discourse--current-site
-                    (discourse-site-url discourse--current-site))))
-    (when site-url
-      (condition-case nil
-          (let* ((data (discourse-api-get-latest-topics nil))
-                 (topic-list (alist-get 'topic_list data))
-                 (topics (alist-get 'topics topic-list)))
-            (seq-doseq (topic (if (vectorp topics) topics (vconcat topics)))
-              (let* ((cat-id (alist-get 'category_id topic))
-                     (topic-id (alist-get 'id topic))
-                     (highest (or (alist-get 'highest_post_number topic) 0))
-                     (read-post (discourse-topic-read-post-number site-url topic-id))
-                     (entry (or (gethash cat-id counts) (list :new 0 :unread 0))))
-                (cond
-                 ((= read-post 0)
-                  (plist-put entry :new (1+ (plist-get entry :new))))
-                 ((> highest read-post)
-                  (plist-put entry :unread (1+ (plist-get entry :unread)))))
-                (puthash cat-id entry counts))))
-        (error nil)))
+(defun discourse-ui--topic-read-post (topic)
+  "Return the highest post number read for TOPIC.
+Prefers the server-provided `last_read_post_number' (which reflects the user's
+read state on the website) and falls back to the local read-state cache."
+  (let* ((id (alist-get 'id topic))
+         (server-read (alist-get 'last_read_post_number topic))
+         (site-url (when discourse--current-site
+                     (discourse-site-url discourse--current-site)))
+         (client-read (if site-url
+                          (discourse-topic-read-post-number site-url id)
+                        0)))
+    (if (and server-read (> server-read 0))
+        (max server-read client-read)
+      client-read)))
+
+(defun discourse-ui--topic-unread-count (topic)
+  "Return the number of unread/new posts in TOPIC.
+Uses server-side tracking fields when present and falls back to the read marker
+returned by `discourse-ui--topic-read-post'."
+  (let* ((highest-post (or (alist-get 'highest_post_number topic) 0))
+         (unseen (eq (alist-get 'unseen topic) t))
+         (unread-posts (or (alist-get 'unread_posts topic) 0))
+         (new-posts (or (alist-get 'new_posts topic) 0))
+         (server-unread (or unseen (> unread-posts 0) (> new-posts 0)))
+         (read-post (discourse-ui--topic-read-post topic)))
+    (cond
+     (server-unread (max (+ unread-posts new-posts) (if unseen 1 0)))
+     ((and (> read-post 0) (> highest-post read-post))
+      (- highest-post read-post))
+     (t 0))))
+
+(defun discourse-ui--category-counts-from-topics (topics)
+  "Count unread/new topics per category from TOPICS.
+Counts one per topic (not per unread post), matching the website's category
+badges: new (unseen) topics go to :new, seen-but-unread topics go to :unread.
+Returns a hash table mapping category-id to (:new N :unread M)."
+  (let ((counts (make-hash-table :test 'eql)))
+    (seq-doseq (topic (if (vectorp topics) topics (vconcat topics)))
+      (let* ((cat-id (alist-get 'category_id topic))
+             (unseen (eq (alist-get 'unseen topic) t))
+             (unread-count (discourse-ui--topic-unread-count topic)))
+        (when (and cat-id (> unread-count 0))
+          (let ((entry (or (gethash cat-id counts) (list :new 0 :unread 0))))
+            (if unseen
+                (setq entry (plist-put entry :new
+                                       (1+ (plist-get entry :new))))
+              (setq entry (plist-put entry :unread
+                                     (1+ (plist-get entry :unread)))))
+            (puthash cat-id entry counts)))))
     counts))
 
+(defun discourse-ui--compute-category-counts ()
+  "Compute per-category new/unread counts from the latest topics page.
+Uses server-provided unread/new fields, so untracked categories still get
+counts for topics visible on the first page of /latest.json.
+Returns a hash table mapping category-id to (:new N :unread M)."
+  (condition-case nil
+      (let* ((data (discourse-api-get-latest-topics nil))
+             (topic-list (alist-get 'topic_list data))
+             (topics (alist-get 'topics topic-list)))
+        (discourse-ui--category-counts-from-topics topics))
+    (error (make-hash-table :test 'eql))))
+
+(defun discourse-ui--update-sidebar-from-topics (topics)
+  "Update cached sidebar category counts from TOPICS and re-render it."
+  (when (and discourse-ui--categories-data topics)
+    (let ((counts (discourse-ui--category-counts-from-topics topics)))
+      (setq discourse-ui--categories-data
+            (discourse-ui--inject-category-counts discourse-ui--categories-data counts))
+      (discourse-ui--rerender-sidebar))))
+
+(defun discourse-ui--fetch-counts ()
+  "Fetch unread/new/message and per-category counts.
+Returns a plist with :unread, :new, :messages, and :counts.
+Nav counts come from /unread.json and /new.json; per-category counts come from
+/latest.json so that untracked categories still show unread/new posts."
+  (let ((counts (discourse-ui--compute-category-counts))
+        (unread 0)
+        (new-count 0)
+        (msg-count 0))
+    (condition-case nil
+        (let* ((data (discourse-api-get-unread-topics))
+               (topic-list (alist-get 'topic_list data))
+               (topics (alist-get 'topics topic-list)))
+          (when topics
+            (setq unread (length (if (vectorp topics) topics (vconcat topics))))))
+      (error nil))
+    (condition-case nil
+        (let* ((data (discourse-api-get-new-topics))
+               (topic-list (alist-get 'topic_list data))
+               (topics (alist-get 'topics topic-list)))
+          (when topics
+            (setq new-count (length (if (vectorp topics) topics (vconcat topics))))))
+      (error nil))
+    (condition-case nil
+        (when (discourse-site-username discourse--current-site)
+          (let* ((data (discourse-api-get-private-messages
+                        (discourse-site-username discourse--current-site)))
+                 (topic-list (alist-get 'topic_list data))
+                 (topics (alist-get 'topics topic-list)))
+            (when topics
+              (setq msg-count
+                    (seq-count
+                     (lambda (topic)
+                       (let ((highest (or (alist-get 'highest_post_number topic) 0))
+                             (last-read (or (alist-get 'last_read_post_number topic) 0)))
+                         (> highest last-read)))
+                     (if (vectorp topics) topics (vconcat topics)))))))
+      (error nil))
+    (list :unread unread :new new-count :messages msg-count :counts counts)))
+
 (defun discourse-ui--inject-category-counts (categories counts)
-  "Inject client-side COUNTS into CATEGORIES data for sidebar display."
+  "Inject client-side COUNTS into CATEGORIES data for sidebar display.
+Prefer server-provided counts when available."
   (mapcar (lambda (cat)
             (let* ((id (alist-get 'id cat))
                    (entry (gethash id counts)))
               (if entry
-                  (let ((cat-copy (copy-alist cat)))
-                    (setf (alist-get 'new_topics cat-copy)
-                          (max (or (alist-get 'new_topics cat-copy) 0)
-                               (plist-get entry :new)))
+                  (let* ((cat-copy (copy-alist cat))
+                         (server-unread (alist-get 'unread cat-copy))
+                         (server-new (alist-get 'new_topics cat-copy)))
                     (setf (alist-get 'unread cat-copy)
-                          (max (or (alist-get 'unread cat-copy) 0)
-                               (plist-get entry :unread)))
+                          (if (and server-unread (> server-unread 0))
+                              server-unread
+                            (plist-get entry :unread)))
+                    (setf (alist-get 'new_topics cat-copy)
+                          (if (and server-new (> server-new 0))
+                              server-new
+                            (plist-get entry :new)))
                     cat-copy)
                 cat)))
           categories))
@@ -495,51 +604,25 @@ Returns an alist of (category-id . (:new N :unread M))."
   (interactive)
   (message "Fetching categories...")
   (let ((cats (discourse-api-get-categories-with-counts)))
-    (if (null cats)
-        ;; Fall back to basic categories endpoint
-        (setq cats (discourse-api-get-categories)))
+    (when (null cats)
+      (message "discourse: include_subcategories request failed, falling back to /site.json")
+      (setq cats (discourse-api-get-all-categories)))
     (if (null cats)
         (message "No categories found or request failed.")
-      ;; Compute client-side new/unread counts per category
-      (let ((cat-counts (discourse-ui--compute-category-counts)))
-        (setq cats (discourse-ui--inject-category-counts cats cat-counts)))
-      (setq discourse-ui--categories-data cats)
-      ;; Fetch navigation counts
-      (let ((nav-counts (discourse-ui--fetch-nav-counts)))
+      ;; Fetch navigation and category counts from server-tracked topics
+      (let* ((counts (discourse-ui--fetch-counts))
+             (nav-counts (list :unread (plist-get counts :unread)
+                               :new (plist-get counts :new)
+                               :messages (plist-get counts :messages)))
+             (cat-counts (plist-get counts :counts)))
+        (setq cats (discourse-ui--inject-category-counts cats cat-counts))
+        (setq discourse-ui--categories-data cats)
         (setq discourse-ui--nav-items nav-counts)
         (discourse-ui--render-sidebar cats nav-counts)
         (goto-char (point-min))
         ;; Move to first actionable item
         (discourse-ui-sidebar-next-item)
         (message "Fetched %d categories." (length cats))))))
-
-(defun discourse-ui--fetch-nav-counts ()
-  "Fetch unread/new/message counts for the navigation section."
-  (let ((unread 0) (new-count 0) (msg-count 0))
-    ;; Try to get unread count
-    (condition-case nil
-        (let* ((data (discourse-api-get-unread-topics))
-               (topic-list (alist-get 'topic_list data))
-               (topics (alist-get 'topics topic-list)))
-          (when topics (setq unread (length topics))))
-      (error nil))
-    ;; Try to get new topics count
-    (condition-case nil
-        (let* ((data (discourse-api-get-new-topics))
-               (topic-list (alist-get 'topic_list data))
-               (topics (alist-get 'topics topic-list)))
-          (when topics (setq new-count (length topics))))
-      (error nil))
-    ;; Try to get message count
-    (condition-case nil
-        (when (discourse-site-username discourse--current-site)
-          (let* ((data (discourse-api-get-private-messages
-                        (discourse-site-username discourse--current-site)))
-                 (topic-list (alist-get 'topic_list data))
-                 (topics (alist-get 'topics topic-list)))
-            (when topics (setq msg-count (length topics)))))
-      (error nil))
-    (list :unread unread :new new-count :messages msg-count)))
 
 (defun discourse-ui-sidebar-next-item ()
   "Move to the next actionable item in the sidebar."
@@ -622,7 +705,7 @@ Returns an alist of (category-id . (:new N :unread M))."
                 (cl-remove-if #'null
                               (mapcar (lambda (tp)
                                         (discourse-ui--format-topic-entry tp users))
-                                      (append topics nil))))
+                                      (discourse-ui--sort-topics topics))))
           (tabulated-list-print t)
           (goto-char (point-min))
           (discourse-ui--display-in-main buf))))))
@@ -654,7 +737,7 @@ Returns an alist of (category-id . (:new N :unread M))."
                 (cl-remove-if #'null
                               (mapcar (lambda (tp)
                                         (discourse-ui--format-topic-entry tp users))
-                                      (append topics nil))))
+                                      (discourse-ui--sort-topics topics))))
           (tabulated-list-print t)
           (goto-char (point-min))
           (discourse-ui--display-in-main buf))))))
@@ -723,6 +806,23 @@ Returns an alist of (category-id . (:new N :unread M))."
       (when user
         (alist-get 'username user)))))
 
+(defun discourse-ui--topic-sort-key (topic)
+  "Return a sort key for TOPIC: unread/new first, then newest last post."
+  (let ((last-posted (or (alist-get 'last_posted_at topic)
+                         (alist-get 'created_at topic) "")))
+    (cons (if (> (discourse-ui--topic-unread-count topic) 0) 0 1)
+          last-posted)))
+
+(defun discourse-ui--sort-topics (topics)
+  "Sort TOPICS so unread/new items come first, then by most recent activity."
+  (sort (append topics nil)
+        (lambda (a b)
+          (let ((ka (discourse-ui--topic-sort-key a))
+                (kb (discourse-ui--topic-sort-key b)))
+            (or (< (car ka) (car kb))
+                (and (= (car ka) (car kb))
+                     (string> (cdr ka) (cdr kb))))))))
+
 (defun discourse-ui--format-topic-entry (topic users)
   "Format a TOPIC alist as a tabulated-list entry, using USERS for lookup."
   (let* ((id (alist-get 'id topic))
@@ -733,30 +833,12 @@ Returns an alist of (category-id . (:new N :unread M))."
          (views (or (alist-get 'views topic) 0))
          (last-posted (or (alist-get 'last_posted_at topic)
                           (alist-get 'created_at topic) ""))
-         (highest-post (or (alist-get 'highest_post_number topic) 0))
-         ;; Server-side tracking
-         (unseen (eq (alist-get 'unseen topic) t))
-         (unread-posts (or (alist-get 'unread_posts topic) 0))
-         (new-posts (or (alist-get 'new_posts topic) 0))
-         (server-unread (or unseen (> unread-posts 0) (> new-posts 0)))
-         ;; Client-side tracking (fallback)
-         (site-url (when discourse--current-site
-                     (discourse-site-url discourse--current-site)))
-         (read-post (if site-url
-                        (discourse-topic-read-post-number site-url id)
-                      0))
-         (client-new (= read-post 0))
-         (client-unread (and (> read-post 0) (> highest-post read-post)))
-         ;; Merge: server wins when it has data, else use client
-         (is-new (or unseen client-new))
-         (is-unread (or server-unread client-unread))
-         (unread-count (if server-unread
-                           (+ unread-posts new-posts)
-                         (if client-unread
-                             (- highest-post read-post)
-                           0)))
+         ;; Server reports new/unseen; read marker reflects website read state
+         (is-new (eq (alist-get 'unseen topic) t))
+         (unread-count (discourse-ui--topic-unread-count topic))
+         (is-unread (> unread-count 0))
          (title-display (cond
-                         ((and is-new client-new)
+                         (is-new
                           (format "%s  [NEW]" title))
                          ((and is-unread (> unread-count 0))
                           (format "%s  (%d new)" title unread-count))
@@ -818,6 +900,7 @@ Returns an alist of (category-id . (:new N :unread M))."
       (setq header-line-format
             (discourse-ui--topics-header-line host category-name discourse-ui--topics-page))
       (discourse-ui-refresh-topics)
+      (discourse-ui--update-sidebar-from-topics discourse-ui--topics-data)
       (discourse-ui--display-in-main buf))))
 
 (defun discourse-ui-show-latest-topics (&optional page)
@@ -835,6 +918,7 @@ Returns an alist of (category-id . (:new N :unread M))."
       (setq header-line-format
             (discourse-ui--topics-header-line host "Latest" discourse-ui--topics-page))
       (discourse-ui-refresh-topics)
+      (discourse-ui--update-sidebar-from-topics discourse-ui--topics-data)
       (discourse-ui--display-in-main buf))))
 
 (defun discourse-ui--update-topics-header ()
@@ -872,7 +956,7 @@ Returns an alist of (category-id . (:new N :unread M))."
       (setq tabulated-list-entries
             (cl-remove-if #'null
                           (mapcar (lambda (tp) (discourse-ui--format-topic-entry tp users))
-                                  (append topics nil))))
+                                  (discourse-ui--sort-topics topics))))
       (tabulated-list-print t)
       (goto-char (point-min))
       (discourse-ui--update-topics-header)
@@ -1074,8 +1158,9 @@ Returns an alist of (category-id . (:new N :unread M))."
 ;;; --- Topic view commands ---
 
 (defun discourse-ui--rerender-topics-buffer ()
-  "Re-render the topic list entries in any visible topics-mode buffer using cached data.
-Does not make API calls; just reformats with updated read state."
+  "Re-render the topic list entries in any visible topics-mode buffer.
+Uses cached data; does not make API calls.  Just reformats with updated
+read state."
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
@@ -1087,7 +1172,8 @@ Does not make API calls; just reformats with updated read state."
                                 (mapcar (lambda (tp)
                                           (discourse-ui--format-topic-entry
                                            tp discourse-ui--topics-users))
-                                        (append discourse-ui--topics-data nil))))
+                                        (discourse-ui--sort-topics
+                                         discourse-ui--topics-data))))
             (tabulated-list-print t)
             (goto-char (min pos (point-max)))))))))
 
@@ -1106,27 +1192,44 @@ Does not make API calls; just reformats with updated read state."
                                           (list :unread 0 :new 0 :messages 0)))
         (goto-char (point-min))))))
 
-(defun discourse-ui-topic-quit ()
-  "Quit topic view and return to the topic list or sidebar."
-  (interactive)
-  (let ((buf (current-buffer)))
-    ;; Try to find another non-sidebar window to land on
-    (let* ((sidebar-win (discourse-ui--sidebar-window))
-           (other-win (seq-find (lambda (w)
-                                  (and (not (eq w (selected-window)))
-                                       (not (eq w sidebar-win))
-                                       (not (window-minibuffer-p w))))
-                                (window-list))))
-      (cond
-       (other-win (select-window other-win))
-       (sidebar-win (select-window sidebar-win))
-       ((discourse-ui--ensure-sidebar)
-        (select-window (discourse-ui--ensure-sidebar)))))
+(defun discourse-ui--refresh-after-post (&optional _topic-id)
+  "Refresh visible topic lists and the sidebar after a post was made.
+_TOPIC-ID is accepted for use as a `discourse-compose-after-send-hook'
+function and is ignored."
+  (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
-      (kill-buffer buf))
-    ;; Re-render topic list and sidebar with updated read state
+      (with-current-buffer buf
+        (when (and (derived-mode-p 'discourse-ui-topics-mode)
+                   (get-buffer-window buf))
+          (discourse-ui-refresh-topics)))))
+  (discourse-ui--rerender-sidebar))
+
+(defun discourse-ui-topic-quit ()
+  "Quit topic view and return to the topic list.
+Keeps focus in the main window showing the topic list rather than jumping to
+the sidebar."
+  (interactive)
+  (let* ((buf (current-buffer))
+         (win (selected-window))
+         (sidebar-win (discourse-ui--sidebar-window))
+         (topics-buf (seq-find
+                      (lambda (b)
+                        (with-current-buffer b
+                          (derived-mode-p 'discourse-ui-topics-mode)))
+                      (buffer-list))))
+    ;; Re-render topic list and sidebar with updated read state first.
     (discourse-ui--rerender-topics-buffer)
-    (discourse-ui--rerender-sidebar)))
+    (discourse-ui--rerender-sidebar)
+    (cond
+     ;; Return to the topic list in the current (main) window.
+     ((and topics-buf (window-live-p win) (not (eq win sidebar-win)))
+      (set-window-buffer win topics-buf)
+      (select-window win))
+     (topics-buf
+      (discourse-ui--display-in-main topics-buf))
+     (sidebar-win (select-window sidebar-win)))
+    (when (buffer-live-p buf)
+      (kill-buffer buf))))
 
 (defun discourse-ui-refresh-topic ()
   "Refresh the current topic view."

@@ -19,7 +19,7 @@ Unlike [nndiscourse](https://github.com/dickmao/nndiscourse) (a Gnus backend), `
 
 ## Authentication
 
-Credentials are stored in `~/.authinfo.gpg` via `auth-source`. Two auth methods are supported:
+Credentials are read via `auth-source`, so they are never stored in your Emacs config. By default `auth-source` reads `~/.authinfo.gpg` (or `~/.authinfo`), but it also supports the Secret Service API, `pass` (password-store), and the macOS Keychain. Two auth methods are supported:
 
 ### API Key (recommended)
 
@@ -38,6 +38,18 @@ machine discourse.example.com login YOUR_USERNAME password YOUR_PASSWORD
 ```
 
 ## Install
+
+### MELPA
+
+Once the package is available on MELPA:
+
+```elisp
+(use-package discourse
+  :ensure t
+  :commands (discourse discourse-connect discourse-switch-site)
+  :custom
+  (discourse-default-url "https://discourse.example.com"))
+```
 
 ### Manual
 

@@ -1,6 +1,6 @@
 ;;; discourse-api.el --- Discourse REST API client  -*- lexical-binding: t; coding: utf-8 -*-
 
-;; Copyright (C) 2024 The Authors of discourse.el
+;; Copyright (C) 2024 Glenn Thompson
 
 ;; This file is part of discourse.el.
 
@@ -165,12 +165,13 @@ Returns non-nil if the token was refreshed."
         (setf (discourse-site-csrf-token site) new-token)
         t))))
 
-(defun discourse-api--request (method url-path &optional data site)
+(defun discourse-api--request (method url-path &optional data site timeout)
   "Make an HTTP request to the Discourse API.
 METHOD is \"GET\", \"POST\", \"PUT\", or \"DELETE\".
 URL-PATH is the path (e.g. \"/categories.json\").
 DATA is an alist to JSON-encode as the request body.
 SITE is a `discourse-site' struct (defaults to `discourse--current-site').
+TIMEOUT is the request timeout in seconds (defaults to 30).
 Returns parsed JSON response or nil on failure."
   (let ((site (or site discourse--current-site)))
     ;; Refresh CSRF token before write requests with session auth
@@ -178,11 +179,11 @@ Returns parsed JSON response or nil on failure."
                site
                (eq (discourse-site-auth-method site) 'session))
       (discourse-api--refresh-csrf site))
-    (discourse-api--request-1 method url-path data site)))
+    (discourse-api--request-1 method url-path data site timeout)))
 
-(defun discourse-api--request-1 (method url-path data site)
-  "Internal: perform the actual HTTP request.
-See `discourse-api--request' for parameter details."
+(defun discourse-api--request-1 (method url-path data site &optional timeout)
+  "Internal: perform the actual HTTP request for METHOD URL-PATH.
+DATA, SITE, and TIMEOUT are as described in `discourse-api--request'."
   (let* ((base-url (and site (discourse-site-url site)))
          (full-url (concat base-url url-path))
          (url-request-method method)
@@ -196,7 +197,7 @@ See `discourse-api--request' for parameter details."
             (encode-coding-string (json-encode data) 'utf-8)))
          (url-mime-accept-string "application/json"))
     (condition-case err
-        (with-current-buffer (url-retrieve-synchronously full-url t nil 30)
+        (with-current-buffer (url-retrieve-synchronously full-url t nil (or timeout 30))
           (let* ((status-code (url-http-symbol-value-in-buffer
                                'url-http-response-status (current-buffer)))
                  (result (discourse-api--parse-json-response)))
@@ -214,13 +215,52 @@ See `discourse-api--request' for parameter details."
                 method full-url (error-message-string err))
        nil))))
 
-(defun discourse-api--get (path &optional site)
-  "GET request to PATH on SITE."
-  (discourse-api--request "GET" path nil site))
+(defun discourse-api--get (path &optional site timeout)
+  "GET request to PATH on SITE with optional TIMEOUT."
+  (discourse-api--request "GET" path nil site timeout))
 
 (defun discourse-api--post (path data &optional site)
   "POST request to PATH with DATA on SITE."
   (discourse-api--request "POST" path data site))
+
+(defun discourse-api--url-encode-params (params)
+  "URL-encode PARAMS, an alist of (KEY . VALUE) string pairs."
+  (mapconcat (lambda (pair)
+               (concat (url-hexify-string (car pair))
+                       "="
+                       (url-hexify-string (cdr pair))))
+             params "&"))
+
+(defun discourse-api--post-form (path params &optional site)
+  "POST form-encoded PARAMS to PATH on SITE.
+PARAMS is an alist of (KEY . VALUE) string pairs.  Used for endpoints such as
+/topics/timings that expect application/x-www-form-urlencoded data.
+Returns non-nil on a successful (HTTP < 400) response."
+  (let ((site (or site discourse--current-site)))
+    (when (and site (eq (discourse-site-auth-method site) 'session))
+      (discourse-api--refresh-csrf site))
+    (let* ((base-url (and site (discourse-site-url site)))
+           (full-url (concat base-url path))
+           (url-request-method "POST")
+           (url-request-extra-headers
+            (discourse-api--build-headers
+             site
+             (list (cons "Content-Type" "application/x-www-form-urlencoded")
+                   (cons "X-Requested-With" "XMLHttpRequest"))))
+           (url-request-data
+            (encode-coding-string
+             (discourse-api--url-encode-params params) 'utf-8))
+           (url-mime-accept-string "application/json"))
+      (condition-case err
+          (with-current-buffer (url-retrieve-synchronously full-url t nil 30)
+            (let ((status-code (url-http-symbol-value-in-buffer
+                                'url-http-response-status (current-buffer))))
+              (kill-buffer (current-buffer))
+              (and (numberp status-code) (< status-code 400))))
+        (error
+         (message "discourse-api: form POST error %s: %s"
+                  full-url (error-message-string err))
+         nil)))))
 
 (defun discourse-api--put (path data &optional site)
   "PUT request to PATH with DATA on SITE."
@@ -380,6 +420,14 @@ Returns a vector of category alists."
               (cats (alist-get 'category_list data)))
     (alist-get 'categories cats)))
 
+(defun discourse-api-get-all-categories (&optional site)
+  "Fetch ALL categories from SITE, including subcategories.
+Uses the /site.json endpoint, which returns every category in a flat list.
+Returns a list of category alists."
+  (when-let* ((data (discourse-api--get "/site.json" site))
+              (cats (alist-get 'categories data)))
+    (append cats nil)))
+
 ;; Topics
 
 (defun discourse-api-get-latest-topics (&optional page site)
@@ -401,6 +449,21 @@ Returns an alist with `topic_list' containing `topics' vector."
   "Fetch a single topic by TOPIC-ID from SITE.
 Returns the full topic alist including the post stream."
   (discourse-api--get (format "/t/%d.json" topic-id) site))
+
+(defun discourse-api-mark-topic-read (topic-id post-numbers &optional site)
+  "Register POST-NUMBERS of TOPIC-ID as read on the server SITE.
+POST-NUMBERS is a list of integer post numbers.  This posts read timings to
+the Discourse /topics/timings endpoint so the read state syncs to the website.
+Returns non-nil on success."
+  (when post-numbers
+    (let ((params (append
+                   (list (cons "topic_id" (number-to-string topic-id))
+                         (cons "topic_time"
+                               (number-to-string (* 1000 (length post-numbers)))))
+                   (mapcar (lambda (pn)
+                             (cons (format "timings[%d]" pn) "1000"))
+                           post-numbers))))
+      (discourse-api--post-form "/topics/timings" params site))))
 
 (defun discourse-api-get-topic-posts (topic-id post-ids &optional site)
   "Fetch specific posts by POST-IDS (list of ints) from TOPIC-ID on SITE."
@@ -503,10 +566,12 @@ Returns a list of user alists with `username' and `name' keys."
 
 (defun discourse-api-get-categories-with-counts (&optional site)
   "Fetch categories including subcategories with unread/new counts from SITE.
-Returns a flat list of all categories including subcategories."
+Returns a flat list of all categories including subcategories.
+Uses a longer timeout because the response can be large."
   (when-let* ((data (discourse-api--get
                      "/categories.json?include_subcategories=true"
-                     site))
+                     site
+                     60))
               (cats (alist-get 'category_list data))
               (top-cats (alist-get 'categories cats)))
     ;; Flatten: collect top-level categories and their subcategories
@@ -549,7 +614,7 @@ Uses curl for reliable binary upload.
 Returns the parsed JSON response with `url', `short_url',
 `original_filename', `width', `height', etc., or nil on failure."
   (unless (executable-find "curl")
-    (user-error "curl is required for file uploads"))
+    (user-error "Curl is required for file uploads"))
   (let* ((site (or site discourse--current-site))
          (base-url (and site (discourse-site-url site)))
          (full-url (concat base-url "/uploads.json"))
