@@ -28,6 +28,7 @@
 (require 'discourse-api)
 
 (declare-function discourse-ui-show-topic "discourse-ui" (topic-id))
+(declare-function discourse-ui--refresh-after-post "discourse-ui" (&optional topic-id))
 
 (defvar discourse-compose-after-send-hook nil
   "Hook run after a post is successfully sent.
@@ -206,6 +207,7 @@ Strips the header/separator lines for new topics."
                      (kill-buffer (current-buffer))
                      (when topic-id
                        (discourse-ui-show-topic topic-id)
+                       (discourse-ui--refresh-after-post topic-id)
                        (run-hook-with-args 'discourse-compose-after-send-hook topic-id))))
                (message "Failed to create topic: %S"
                         (or (alist-get 'errors result)
@@ -225,6 +227,7 @@ Strips the header/separator lines for new topics."
                    (kill-buffer (current-buffer))
                    (when topic-id
                      (discourse-ui-show-topic topic-id)
+                     (discourse-ui--refresh-after-post topic-id)
                      (run-hook-with-args 'discourse-compose-after-send-hook topic-id))))
              (message "Failed to send reply: %S"
                       (or (alist-get 'errors result)

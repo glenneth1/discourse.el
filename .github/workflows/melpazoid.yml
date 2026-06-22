@@ -31,7 +31,7 @@ jobs:
         env:
           LOCAL_REPO: ${{ github.workspace }}
           # RECIPE is the package recipe as it will appear on MELPA.
-          RECIPE: (discourse :repo "glenneth1/discourse.el" :fetcher github)
+          RECIPE: (discourse :fetcher github :repo "glenneth1/discourse.el")
           # Set EXIST_OK to true once the package is published on MELPA.
           EXIST_OK: 'false'
         run: |

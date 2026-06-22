@@ -582,8 +582,7 @@ Uses a longer timeout because the response can be large."
         (let ((subcats (alist-get 'subcategory_list cat)))
           (when subcats
             (seq-doseq (sub (if (vectorp subcats) subcats (vconcat subcats)))
-              (push sub all-cats))))
-)
+              (push sub all-cats)))))
       (nreverse all-cats))))
 
 ;;; --- File uploads ---

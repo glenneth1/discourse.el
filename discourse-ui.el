@@ -239,9 +239,9 @@ formatting markers survive as literal text in the HTML."
           (insert "<li>" item "</li>"))
         (insert "</ul>")))))
 
-;;; ======================================================================
+;; ======================================================================
 ;;; Category List View (Sidebar-style)
-;;; ======================================================================
+;; ======================================================================
 
 (defvar-local discourse-ui--categories-data nil
   "Cached category data for the current buffer.")
@@ -742,9 +742,9 @@ Prefer server-provided counts when available."
           (goto-char (point-min))
           (discourse-ui--display-in-main buf))))))
 
-;;; ======================================================================
+;; ======================================================================
 ;;; Topic List View
-;;; ======================================================================
+;; ======================================================================
 
 (defvar-local discourse-ui--topics-data nil
   "Cached topic data for the current buffer.")
@@ -1005,9 +1005,9 @@ Prefer server-provided counts when available."
   (interactive)
   (discourse-ui-show-latest-topics))
 
-;;; ======================================================================
+;; ======================================================================
 ;;; Topic/Post Thread View
-;;; ======================================================================
+;; ======================================================================
 
 (defvar-local discourse-ui--topic-data nil
   "Full topic data for the current buffer.")

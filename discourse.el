@@ -63,10 +63,6 @@
 (require 'discourse-ui)
 (require 'discourse-compose)
 
-;; Refresh visible topic lists and the sidebar after a post is sent.
-(add-hook 'discourse-compose-after-send-hook
-          #'discourse-ui--refresh-after-post)
-
 ;;; --- Customization ---
 
 (defgroup discourse nil
